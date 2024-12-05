@@ -13,9 +13,9 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 )
 
-const toolDescription = `Get Go documentation for a package, type, function, or method. 
-This is the preferred and most efficient way to understand Go packages, providing official package 
-documentation in a concise format. Use this before attempting to read source files directly. Results 
+const toolDescription = `Get Go documentation for a package, type, function, or method.
+This is the preferred and most efficient way to understand Go packages, providing official package
+documentation in a concise format. Use this before attempting to read source files directly. Results
 are cached and optimized for AI consumption.`
 
 // Create a shared input schema definition to ensure consistency
@@ -93,42 +93,64 @@ func (s *GodocServer) runGoDoc(workingDir string, args ...string) (string, error
 }
 
 // validatePath ensures the path is either a valid local file/directory or appears to be a valid import path
-func (s *GodocServer) validatePath(path string) error {
+func (s *GodocServer) validatePath(path string) (error, []string) {
 	// If it starts with . or /, treat as local path and validate it exists
 	if strings.HasPrefix(path, ".") || strings.HasPrefix(path, "/") {
 		absPath, err := filepath.Abs(path)
 		if err != nil {
-			return fmt.Errorf("invalid path: %v", err)
+			return fmt.Errorf("invalid path: %v", err), nil
 		}
 
 		info, err := os.Stat(absPath)
 		if err != nil {
-			return fmt.Errorf("path does not exist: %v", err)
+			return fmt.Errorf("path does not exist: %v", err), nil
 		}
 
 		if info.IsDir() {
 			entries, err := os.ReadDir(absPath)
 			if err != nil {
-				return fmt.Errorf("cannot read directory: %v", err)
+				return fmt.Errorf("cannot read directory: %v", err), nil
 			}
+
+			// Look for go files in current directory
 			hasGoFiles := false
 			for _, entry := range entries {
-				if !entry.IsDir() && (entry.Name() == "go.mod" || strings.HasSuffix(entry.Name(), ".go")) {
+				if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".go") {
 					hasGoFiles = true
 					break
 				}
 			}
+
+			// If no Go files found, collect subdirectories
 			if !hasGoFiles {
-				return fmt.Errorf("directory does not contain Go files")
+				var subDirs []string
+				for _, entry := range entries {
+					if entry.IsDir() {
+						// Check if subdirectory has any .go files
+						subEntries, err := os.ReadDir(filepath.Join(absPath, entry.Name()))
+						if err == nil {
+							for _, subEntry := range subEntries {
+								if !subEntry.IsDir() && strings.HasSuffix(subEntry.Name(), ".go") {
+									subDirs = append(subDirs, filepath.Join(path, entry.Name()))
+									break
+								}
+							}
+						}
+					}
+				}
+				if len(subDirs) > 0 {
+					return fmt.Errorf("no Go files in directory, but found Go packages in subdirectories"), subDirs
+				}
+				return fmt.Errorf("no Go files found in directory or subdirectories"), nil
 			}
 		} else if !strings.HasSuffix(absPath, ".go") {
-			return fmt.Errorf("file is not a Go source file")
+			return fmt.Errorf("file is not a Go source file"), nil
 		}
-		return nil
+		return nil, nil
 	}
 
-	// For all other paths, treat as import path - go doc will validate them
-	return nil
+	// For all other paths, treat as import path
+	return nil, nil
 }
 
 // handleListTools implements the tools/list endpoint
@@ -155,7 +177,21 @@ func (s *GodocServer) handleToolCall(arguments map[string]interface{}) (*mcp.Cal
 		return nil, fmt.Errorf("path argument is required")
 	}
 
-	if err := s.validatePath(path); err != nil {
+	err, subDirs := s.validatePath(path)
+	if err != nil {
+		if subDirs != nil {
+			// Return a special response indicating available subdirectories
+			metadata := fmt.Sprintf("No Go files found in %s, but found Go packages in the following subdirectories:\n", path)
+			listing := strings.Join(subDirs, "\n")
+			return &mcp.CallToolResult{
+				Content: []interface{}{
+					map[string]interface{}{
+						"type": "text",
+						"text": metadata + listing,
+					},
+				},
+			}, nil
+		}
 		return nil, err
 	}
 
