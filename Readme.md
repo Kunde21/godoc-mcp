@@ -28,16 +28,27 @@ The server will:
 
 ## Why Use godoc-mcp?
 
-Traditional file-reading approaches require LLMs to process entire source files to understand Go packages. godoc-mcp provides several advantages:
+In a sentence: `godoc-mcp` provides a more token efficient way for LLMs to understand Go projects.
+
+Traditional file-reading approaches require LLMs to process entire source files often many files to understand a single package. `godoc-mcp` provides several advantages:
 
 1. **Token Efficiency**: Returns only the essential documentation, reducing token usage significantly
 2. **Structured Information**: Provides official package documentation in a consistent, well-structured format
 3. **Project Navigation**: Smart handling of project structures helps LLMs understand multi-package projects
 4. **Integration Ready**: Works alongside other MCP servers, enabling both high-level and detailed code analysis
-5. **Performance**: Caching and optimized token usage make godoc-mcp a fast and efficient tool for Go development
+5. **Performance**: Caching and optimized token usage make `godoc-mcp` a fast and efficient tool for Go development
 6. **Local**: Does not require an internet connection to access documentation
 
-By also using another MCP server that can read files, the LLM can first try with `godoc-mcp` to get the concise documentation for exported items thus saving tokens, and only if that fails to return enough information fall back to reading the source files.
+With `godoc-mcp`, a LLM can get precisely the information it needs without having to read entire source files. Here are the different levels of detail that an LLM can get.
+
+- Documentation for one exported symbol
+- The complete source for one symbol
+- A list of all exported symbols (the concise documentation)
+- A list of all symbols including unexported symbols
+- The full documentation for a package
+- The entire source for a package
+
+This makes `godoc-mcp` an essential tool for Go developers using LLMs by enabling LLMs to understand significantly more, and in more detail, about the context than previously possible in any programming language.
 
 ## Getting Started
 
@@ -47,43 +58,53 @@ go install github.com/mrjoshuak/godoc-mcp@latest
 
 ### Examples
 
-1. Project Understanding:
-"I'm looking at a Go project at /path/to/some/project. What packages does it contain and what do they do?"
+In addition to providing documentation while working on coding tasks. `godoc-mcp` can also be used to explore Go projects and packages. Here are some examples for general prompting:
 
-2. Package Interface Understanding:
-"What interfaces does the io package provide? I'm particularly interested in anything related to reading."
+#### Project Understanding
 
-3. Implementation Guidance:
-"I need to implement the io.Reader interface. Show me its documentation and any related types I should know about."
+**"I'm looking at a Go project at /path/to/some/project. What packages does it contain and what do they do?"**
 
-4. API Usage:
-"Show me the documentation for the Resource type in the /path/to/some/project. I need to understand how to create and use it."
+#### Package Interface Understanding
 
-5. Library Exploration:
-"I'm in /path/to/some/project which uses github.com/gorilla/mux. Show me the documentation for the Router type."
+**"What interfaces does the io package provide? I'm particularly interested in anything related to reading."***
 
-6. Method Discovery:
-"What methods are available on the http.Request type? I'm working with standard library HTTP handlers."
+#### Implementation Guidance
 
-7. Focused Learning:
-"Explain how to configure the Server type in the /path/to/project/server package."
+**"I need to implement the io.Reader interface. Show me its documentation and any related types I should know about."**
 
-8. Package Browsing:
-"I'm in a new Go project directory and see multiple packages. Can you show me what each one does?"
+#### API Usage
+
+**"Show me the documentation for the Resource type in the /path/to/some/project. I need to understand how to create and use it."**
+
+#### Library Exploration
+
+**"I'm in /path/to/some/project which uses github.com/gorilla/mux. Show me the documentation for the Router type."**
+
+#### Method Discovery
+
+**"What methods are available on the http.Request type? I'm working with standard library HTTP handlers."**
+
+#### Focused Learning
+
+**"Explain how to configure the Server type in the /path/to/project/server package."**
+
+#### Package Browsing
+
+**"I'm in a new Go project directory and see multiple packages. Can you show me what each one does?"**
 
 ## Usage
 
 To add to the Claude desktop app:
 
-```json
+```yaml
 {
-	"mcpServers": {
-		// other MCP servers ...
+  "mcpServers": {
+    # other MCP servers ...
     "godoc": {
-			"command": "/path/to/godoc-mcp",
+      "command": "/path/to/godoc-mcp",
       "args": []
     }
-	}
+  }
 }
 ```
 
@@ -104,7 +125,7 @@ Advanced `cmd_flags` values that an LLM can leverage:
 - If documentation for third-party packages fails, ensure you've set the correct `working_dir` parameter to a directory that imports the package
 - For import paths, make sure you're in a directory with the appropriate go.mod file
 - For local paths, ensure they contain Go source files or point to directories containing Go packages
--
+
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
