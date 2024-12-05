@@ -8,27 +8,15 @@
 
 `godoc-mcp` is a Model Context Protocol (MCP) server that provides efficient access to Go documentation. It helps LLMs understand Go projects by providing direct access to package documentation without needing to read entire source files. `godoc-mcp` can vastly improve the performance of using LLMs to develop in Go by substantially reducing the number of tokens needed to understand and make use of Go packages.
 
-## Features
+## Getting Started
 
-The server will:
-1. For directories with Go files: Return package documentation
-2. For directories without Go files: List available Go packages in subdirectories
-3. For import paths: Return standard library or third-party package documentation
-
-- **Efficient Documentation Access**: Retrieves official Go documentation with minimal token usage
-- **Smart Package Discovery**: When pointed at a directory without Go files, lists available Go packages in subdirectories
-- **Flexible Path Support**:
-  - Local file paths (e.g., "/full/path/to/mypackage")
-  - Import paths (e.g., "io", "github.com/user/repo")
-- **Module-Aware**: Supports documentation for third-party packages through working directory context (i.e. it will run `go doc` from the working directory)
-- **Performance Optimized**:
-  - Built-in response caching
-  - Efficient token usage through focused documentation retrieval
-  - Metadata about response sizes
+```bash
+go install github.com/mrjoshuak/godoc-mcp@latest
+```
 
 ## Why Use godoc-mcp?
 
-In a sentence: `godoc-mcp` provides a more token efficient way for LLMs to understand Go projects.
+In a sentence: **`godoc-mcp` provides a more token efficient way for LLMs to understand Go projects.**
 
 Traditional file-reading approaches require LLMs to process entire source files often many files to understand a single package. `godoc-mcp` provides several advantages:
 
@@ -50,11 +38,23 @@ With `godoc-mcp`, a LLM can get precisely the information it needs without havin
 
 This makes `godoc-mcp` an essential tool for Go developers using LLMs by enabling LLMs to understand significantly more, and in more detail, about the context than previously possible in any programming language.
 
-## Getting Started
+## Features
 
-```bash
-go install github.com/mrjoshuak/godoc-mcp@latest
-```
+The server will:
+1. For directories with Go files: Return package documentation
+2. For directories without Go files: List available Go packages in subdirectories
+3. For import paths: Return standard library or third-party package documentation
+
+- **Efficient Documentation Access**: Retrieves official Go documentation with minimal token usage
+- **Smart Package Discovery**: When pointed at a directory without Go files, lists available Go packages in subdirectories
+- **Flexible Path Support**:
+  - Local file paths (e.g., "/full/path/to/mypackage")
+  - Import paths (e.g., "io", "github.com/user/repo")
+- **Module-Aware**: Supports documentation for third-party packages through working directory context (i.e. it will run `go doc` from the working directory)
+- **Performance Optimized**:
+  - Built-in response caching
+  - Efficient token usage through focused documentation retrieval
+  - Metadata about response sizes
 
 ### Examples
 
@@ -62,35 +62,35 @@ In addition to providing documentation while working on coding tasks. `godoc-mcp
 
 #### Project Understanding
 
-**"I'm looking at a Go project at /path/to/some/project. What packages does it contain and what do they do?"**
+"I'm looking at a Go project at /path/to/some/project. What packages does it contain and what do they do?"
 
 #### Package Interface Understanding
 
-**"What interfaces does the io package provide? I'm particularly interested in anything related to reading."***
+"What interfaces does the io package provide? I'm particularly interested in anything related to reading."*
 
 #### Implementation Guidance
 
-**"I need to implement the io.Reader interface. Show me its documentation and any related types I should know about."**
+"I need to implement the io.Reader interface. Show me its documentation and any related types I should know about."
 
 #### API Usage
 
-**"Show me the documentation for the Resource type in the /path/to/some/project. I need to understand how to create and use it."**
+"Show me the documentation for the Resource type in the /path/to/some/project. I need to understand how to create and use it."
 
 #### Library Exploration
 
-**"I'm in /path/to/some/project which uses github.com/gorilla/mux. Show me the documentation for the Router type."**
+"I'm in /path/to/some/project which uses github.com/gorilla/mux. Show me the documentation for the Router type."
 
 #### Method Discovery
 
-**"What methods are available on the http.Request type? I'm working with standard library HTTP handlers."**
+"What methods are available on the http.Request type? I'm working with standard library HTTP handlers."
 
 #### Focused Learning
 
-**"Explain how to configure the Server type in the /path/to/project/server package."**
+"Explain how to configure the Server type in the /path/to/project/server package."
 
 #### Package Browsing
 
-**"I'm in a new Go project directory and see multiple packages. Can you show me what each one does?"**
+"I'm in a new Go project directory and see multiple packages. Can you show me what each one does?"
 
 ## Usage
 
