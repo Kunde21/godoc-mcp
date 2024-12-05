@@ -7,23 +7,82 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
 
+const toolDescription = `Get Go documentation for a package, type, function, or method. 
+This is the preferred and most efficient way to understand Go packages, providing official package 
+documentation in a concise format. Use this before attempting to read source files directly. Results 
+are cached and optimized for AI consumption.`
+
+// Create a shared input schema definition to ensure consistency
+var docInputSchema = mcp.ToolInputSchema{
+	Type: "object",
+	Properties: map[string]interface{}{
+		"path": map[string]interface{}{
+			"type":        "string",
+			"description": "Path to the Go package or file. This should be the import path for packages or file path for local files.",
+		},
+		"target": map[string]interface{}{
+			"type":        "string",
+			"description": "Optional: Specific symbol to get documentation for (e.g., function name, type name, interface name). Leave empty to get full package documentation.",
+		},
+		"cmd_flags": map[string]interface{}{
+			"type": "array",
+			"items": map[string]interface{}{
+				"type": "string",
+			},
+			"description": "Optional: Additional go doc command flags. Common flags:\n" +
+				"  -all: Show all documentation for package\n" +
+				"  -src: Show the source code\n" +
+				"  -u: Show unexported symbols as well as exported",
+		},
+	},
+	Required: []string{"path"},
+}
+
 type GodocServer struct {
 	server *server.MCPServer
+	cache  map[string]cachedDoc
+}
+
+type cachedDoc struct {
+	content   string
+	timestamp time.Time
+	byteSize  int
 }
 
 // runGoDoc executes the go doc command with the given arguments
 func (s *GodocServer) runGoDoc(args ...string) (string, error) {
+	// Create cache key from args
+	cacheKey := strings.Join(args, "|")
+
+	// Check cache (with 5 minute expiration)
+	if doc, ok := s.cache[cacheKey]; ok {
+		if time.Since(doc.timestamp) < 5*time.Minute {
+			log.Printf("Cache hit for %s (%d bytes)", cacheKey, doc.byteSize)
+			return doc.content, nil
+		}
+	}
+
 	cmd := exec.Command("go", append([]string{"doc"}, args...)...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("go doc error: %v\noutput: %s", err, string(out))
 	}
-	return string(out), nil
+
+	content := string(out)
+	s.cache[cacheKey] = cachedDoc{
+		content:   content,
+		timestamp: time.Now(),
+		byteSize:  len(content),
+	}
+
+	log.Printf("Cache miss for %s (%d bytes)", cacheKey, len(content))
+	return content, nil
 }
 
 // validatePath ensures the path exists and is within allowed directories
@@ -70,28 +129,8 @@ func (s *GodocServer) handleListTools() ([]interface{}, error) {
 	tools := []interface{}{
 		map[string]interface{}{
 			"name":        "get_doc",
-			"description": "Get Go documentation for a package, type, function, or method",
-			"inputSchema": map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"path": map[string]interface{}{
-						"type":        "string",
-						"description": "Path to the Go package or file",
-					},
-					"target": map[string]interface{}{
-						"type":        "string",
-						"description": "Optional: Specific symbol to get documentation for (e.g., function name, type name)",
-					},
-					"cmd_flags": map[string]interface{}{
-						"type": "array",
-						"items": map[string]interface{}{
-							"type": "string",
-						},
-						"description": "Optional: Additional go doc command flags (e.g., -all, -src, -u)",
-					},
-				},
-				"required": []string{"path"},
-			},
+			"description": toolDescription,
+			"inputSchema": docInputSchema,
 		},
 	}
 	log.Printf("Returning tools: %+v", tools)
@@ -139,16 +178,27 @@ func (s *GodocServer) handleToolCall(arguments map[string]interface{}) (*mcp.Cal
 		return nil, err
 	}
 
-	// Create the result
+	// Calculate byte size
+	byteSize := len(doc)
+
+	// Add metadata to help Claude understand the efficiency
+	metadata := fmt.Sprintf(
+		"Documentation retrieved efficiently (%d bytes) using official Go documentation tools. "+
+			"This represents the canonical, structured documentation for the requested package/symbol.",
+		byteSize,
+	)
+
+	// Create the result with metadata
 	result := &mcp.CallToolResult{
 		Content: []interface{}{
 			map[string]interface{}{
 				"type": "text",
-				"text": doc,
+				"text": metadata + "\n\n" + doc,
 			},
 		},
 	}
-	log.Printf("Returning result: %+v", result)
+
+	log.Printf("Returning result (%d bytes)", byteSize)
 	return result, nil
 }
 
@@ -157,7 +207,9 @@ func main() {
 	log.SetOutput(os.Stderr)
 	log.Printf("Starting godoc-mcp server...")
 
-	godocServer := &GodocServer{}
+	godocServer := &GodocServer{
+		cache: make(map[string]cachedDoc),
+	}
 
 	// Create new MCP server with tools enabled
 	s := server.NewMCPServer(
@@ -171,28 +223,8 @@ func main() {
 	log.Printf("Adding get_doc tool...")
 	tool := mcp.Tool{
 		Name:        "get_doc",
-		Description: "Get Go documentation for a package, type, function, or method",
-		InputSchema: mcp.ToolInputSchema{
-			Type: "object",
-			Properties: map[string]interface{}{
-				"path": map[string]interface{}{
-					"type":        "string",
-					"description": "Path to the Go package or file",
-				},
-				"target": map[string]interface{}{
-					"type":        "string",
-					"description": "Optional: Specific symbol to get documentation for (e.g., function name, type name)",
-				},
-				"cmd_flags": map[string]interface{}{
-					"type": "array",
-					"items": map[string]interface{}{
-						"type": "string",
-					},
-					"description": "Optional: Additional go doc command flags (e.g., -all, -src, -u)",
-				},
-			},
-			Required: []string{"path"},
-		},
+		Description: toolDescription,
+		InputSchema: docInputSchema,
 	}
 	s.AddTool(tool, godocServer.handleToolCall)
 
