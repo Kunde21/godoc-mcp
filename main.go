@@ -24,7 +24,7 @@ var docInputSchema = mcp.ToolInputSchema{
 	Properties: map[string]interface{}{
 		"path": map[string]interface{}{
 			"type":        "string",
-			"description": "Path to the Go package or file. This should be the import path for packages or file path for local files.",
+			"description": "Path to the Go package or file. This can be an import path (e.g., 'io', 'github.com/user/repo') or a local file path.",
 		},
 		"target": map[string]interface{}{
 			"type":        "string",
@@ -39,6 +39,10 @@ var docInputSchema = mcp.ToolInputSchema{
 				"  -all: Show all documentation for package\n" +
 				"  -src: Show the source code\n" +
 				"  -u: Show unexported symbols as well as exported",
+		},
+		"working_dir": map[string]interface{}{
+			"type":        "string",
+			"description": "Optional: Working directory to execute go doc from. Required for some import paths that depend on module context.",
 		},
 	},
 	Required: []string{"path"},
@@ -55,10 +59,10 @@ type cachedDoc struct {
 	byteSize  int
 }
 
-// runGoDoc executes the go doc command with the given arguments
-func (s *GodocServer) runGoDoc(args ...string) (string, error) {
-	// Create cache key from args
-	cacheKey := strings.Join(args, "|")
+// runGoDoc executes the go doc command with the given arguments and optional working directory
+func (s *GodocServer) runGoDoc(workingDir string, args ...string) (string, error) {
+	// Create cache key that includes working directory
+	cacheKey := workingDir + "|" + strings.Join(args, "|")
 
 	// Check cache (with 5 minute expiration)
 	if doc, ok := s.cache[cacheKey]; ok {
@@ -69,6 +73,9 @@ func (s *GodocServer) runGoDoc(args ...string) (string, error) {
 	}
 
 	cmd := exec.Command("go", append([]string{"doc"}, args...)...)
+	if workingDir != "" {
+		cmd.Dir = workingDir
+	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("go doc error: %v\noutput: %s", err, string(out))
@@ -85,41 +92,42 @@ func (s *GodocServer) runGoDoc(args ...string) (string, error) {
 	return content, nil
 }
 
-// validatePath ensures the path exists and is within allowed directories
+// validatePath ensures the path is either a valid local file/directory or appears to be a valid import path
 func (s *GodocServer) validatePath(path string) error {
-	// Convert to absolute path
-	absPath, err := filepath.Abs(path)
-	if err != nil {
-		return fmt.Errorf("invalid path: %v", err)
-	}
-
-	// Check if path exists
-	info, err := os.Stat(absPath)
-	if err != nil {
-		return fmt.Errorf("path does not exist: %v", err)
-	}
-
-	// Check if it's a directory containing Go files
-	if info.IsDir() {
-		// Check for go.mod or .go files
-		hasGoFiles := false
-		entries, err := os.ReadDir(absPath)
+	// If it starts with . or /, treat as local path and validate it exists
+	if strings.HasPrefix(path, ".") || strings.HasPrefix(path, "/") {
+		absPath, err := filepath.Abs(path)
 		if err != nil {
-			return fmt.Errorf("cannot read directory: %v", err)
+			return fmt.Errorf("invalid path: %v", err)
 		}
-		for _, entry := range entries {
-			if !entry.IsDir() && (entry.Name() == "go.mod" || strings.HasSuffix(entry.Name(), ".go")) {
-				hasGoFiles = true
-				break
+
+		info, err := os.Stat(absPath)
+		if err != nil {
+			return fmt.Errorf("path does not exist: %v", err)
+		}
+
+		if info.IsDir() {
+			entries, err := os.ReadDir(absPath)
+			if err != nil {
+				return fmt.Errorf("cannot read directory: %v", err)
 			}
+			hasGoFiles := false
+			for _, entry := range entries {
+				if !entry.IsDir() && (entry.Name() == "go.mod" || strings.HasSuffix(entry.Name(), ".go")) {
+					hasGoFiles = true
+					break
+				}
+			}
+			if !hasGoFiles {
+				return fmt.Errorf("directory does not contain Go files")
+			}
+		} else if !strings.HasSuffix(absPath, ".go") {
+			return fmt.Errorf("file is not a Go source file")
 		}
-		if !hasGoFiles {
-			return fmt.Errorf("directory does not contain Go files")
-		}
-	} else if !strings.HasSuffix(absPath, ".go") {
-		return fmt.Errorf("file is not a Go source file")
+		return nil
 	}
 
+	// For all other paths, treat as import path - go doc will validate them
 	return nil
 }
 
@@ -151,6 +159,15 @@ func (s *GodocServer) handleToolCall(arguments map[string]interface{}) (*mcp.Cal
 		return nil, err
 	}
 
+	// Get working directory if provided
+	workingDir := ""
+	if wd, ok := arguments["working_dir"].(string); ok && wd != "" {
+		if info, err := os.Stat(wd); err != nil || !info.IsDir() {
+			return nil, fmt.Errorf("invalid working directory: %v", err)
+		}
+		workingDir = wd
+	}
+
 	// Build command arguments
 	var cmdArgs []string
 
@@ -171,8 +188,8 @@ func (s *GodocServer) handleToolCall(arguments map[string]interface{}) (*mcp.Cal
 		cmdArgs = append(cmdArgs, target)
 	}
 
-	// Run go doc command
-	doc, err := s.runGoDoc(cmdArgs...)
+	// Run go doc command with working directory
+	doc, err := s.runGoDoc(workingDir, cmdArgs...)
 	if err != nil {
 		log.Printf("Error running go doc: %v", err)
 		return nil, err
