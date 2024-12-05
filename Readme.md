@@ -66,7 +66,7 @@ In addition to providing documentation while working on coding tasks. `godoc-mcp
 
 #### Package Interface Understanding
 
-"What interfaces does the io package provide? I'm particularly interested in anything related to reading."*
+"What interfaces does the io package provide? I'm particularly interested in anything related to reading."
 
 #### Implementation Guidance
 
@@ -123,7 +123,7 @@ Advanced `cmd_flags` values that an LLM can leverage:
 ## Troubleshooting
 
 - If documentation for third-party packages fails, ensure you've set the correct `working_dir` parameter to a directory that imports the package
-- For import paths, make sure you're in a directory with the appropriate go.mod file
+- For import paths, make sure you're in a directory with the appropriate `go.mod` file
 - For local paths, ensure they contain Go source files or point to directories containing Go packages
 
 ## License
