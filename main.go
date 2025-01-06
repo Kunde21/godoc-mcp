@@ -16,7 +16,20 @@ import (
 const toolDescription = `Get Go documentation for a package, type, function, or method.
 This is the preferred and most efficient way to understand Go packages, providing official package
 documentation in a concise format. Use this before attempting to read source files directly. Results
-are cached and optimized for AI consumption.`
+are cached and optimized for AI consumption.
+
+Best Practices:
+1. ALWAYS try this tool first before reading package source code
+2. Start with basic package documentation before looking at source code or specific symbols
+3. Use -all flag when you need comprehensive package documentation
+4. Only look up specific symbols after understanding the package overview
+
+Common Usage Patterns:
+- Standard library: Use just the package name (e.g., "io", "net/http")
+- External packages: Use full import path (e.g., "github.com/user/repo")
+- Local packages: Use relative path (e.g., "./pkg") or absolute path
+
+The documentation is cached for 5 minutes to improve performance.`
 
 // Create a shared input schema definition to ensure consistency
 var docInputSchema = mcp.ToolInputSchema{
@@ -78,7 +91,30 @@ func (s *GodocServer) runGoDoc(workingDir string, args ...string) (string, error
 	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("go doc error: %v\noutput: %s", err, string(out))
+		// Enhanced error handling with suggestions
+		errStr := string(out)
+		if strings.Contains(errStr, "no such package") || strings.Contains(errStr, "is not in std") {
+			return "", fmt.Errorf("Package not found. Suggestions:\n"+
+				"1. For standard library packages, use just the package name (e.g., 'io', 'net/http')\n"+
+				"2. For external packages, ensure they are imported in the module\n"+
+				"3. For local packages, provide the relative path (e.g., './pkg') or absolute path\n"+
+				"4. Check for typos in the package name\n"+
+				"Error details: %s", errStr)
+		}
+		if strings.Contains(errStr, "no such symbol") {
+			return "", fmt.Errorf("Symbol not found. Suggestions:\n"+
+				"1. Check if the symbol name is correct (case-sensitive)\n"+
+				"2. Use -u flag to see unexported symbols\n"+
+				"3. Use -all flag to see all package documentation\n"+
+				"Error: %v", err)
+		}
+		if strings.Contains(errStr, "build constraints exclude all Go files") {
+			return "", fmt.Errorf("No Go files found for current platform. Suggestions:\n"+
+				"1. Try using -all flag to see all package files\n"+
+				"2. Check if you need to set GOOS/GOARCH environment variables\n"+
+				"Error: %v", err)
+		}
+		return "", fmt.Errorf("go doc error: %v\noutput: %s\nTip: Use -h flag to see all available options", err, errStr)
 	}
 
 	content := string(out)
@@ -234,10 +270,20 @@ func (s *GodocServer) handleToolCall(arguments map[string]interface{}) (*mcp.Cal
 	// Calculate byte size
 	byteSize := len(doc)
 
-	// Add metadata to help Claude understand the efficiency
+	// Enhanced metadata with usage guidance
 	metadata := fmt.Sprintf(
-		"Documentation retrieved efficiently (%d bytes) using official Go documentation tools. "+
-			"This represents the canonical, structured documentation for the requested package/symbol.",
+		"Documentation retrieved efficiently (%d bytes) using official Go documentation tools.\n"+
+			"This represents the canonical, structured documentation for the requested package/symbol.\n\n"+
+			"Usage Tips:\n"+
+			"1. Start with basic package docs before looking at source (-src flag)\n"+
+			"2. Use -all flag to see comprehensive package documentation\n"+
+			"3. Use -u flag to see unexported symbols if needed\n"+
+			"4. For specific items, provide the target parameter (e.g., Type, Function, Method)\n\n"+
+			"Example queries:\n"+
+			"- Basic package docs: {\"path\": \"net/http\"}\n"+
+			"- All package docs: {\"path\": \"io\", \"cmd_flags\": [\"-all\"]}\n"+
+			"- Specific type: {\"path\": \"net/http\", \"target\": \"Client\"}\n"+
+			"- Source code: {\"path\": \"io\", \"target\": \"Reader\", \"cmd_flags\": [\"-src\"]}\n",
 		byteSize,
 	)
 
