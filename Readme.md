@@ -50,11 +50,17 @@ The server will:
 - **Flexible Path Support**:
   - Local file paths (e.g., "/full/path/to/mypackage")
   - Import paths (e.g., "io", "github.com/user/repo")
+- **Automatic Module Context**:
+  - Creates temporary Go projects when needed
+  - Automatically sets up module context for external packages
+  - No manual module setup required for any package documentation
+  - Handles cleanup of temporary projects
 - **Module-Aware**: Supports documentation for third-party packages through working directory context (i.e. it will run `go doc` from the working directory)
 - **Performance Optimized**:
   - Built-in response caching
   - Efficient token usage through focused documentation retrieval
   - Metadata about response sizes
+  - Smart handling of standard library vs external packages
 
 ### Examples
 
@@ -102,7 +108,11 @@ To add to the Claude desktop app:
     # other MCP servers ...
     "godoc": {
       "command": "/path/to/godoc-mcp",
-      "args": []
+      "args": [],
+      "env": {
+        "GOPATH": "/path/to/go",
+        "GOMODCACHE": "/path/to/go/pkg/mod"
+      }
     }
   }
 }
@@ -113,7 +123,7 @@ When connected to an MCP-capable LLM (like Claude), godoc-mcp provides the `get_
 - `path`: Path to the Go package or file (import path or file path)
 - `target` (optional): Specific symbol to document (function, type, etc.)
 - `cmd_flags` (optional): Additional go doc command flags
-- `working_dir` (optional): Working directory for module-aware documentation
+- `working_dir` (optional): Working directory for module-aware documentation (if not provided, a temporary project will be created automatically)
 
 Advanced `cmd_flags` values that an LLM can leverage:
 - `-all`: Show all documentation for package, excluding unexported symbols
@@ -122,9 +132,9 @@ Advanced `cmd_flags` values that an LLM can leverage:
 
 ## Troubleshooting
 
-- If documentation for third-party packages fails, ensure you've set the correct `working_dir` parameter to a directory that imports the package
-- For import paths, make sure you're in a directory with the appropriate `go.mod` file
 - For local paths, ensure they contain Go source files or point to directories containing Go packages
+- If you see module-related errors, ensure GOPATH and GOMODCACHE environment variables are set correctly in your MCP server configuration
+- The server automatically handles module context for external packages, but you can still provide a specific working_dir if needed for special cases
 
 ## License
 

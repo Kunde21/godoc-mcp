@@ -62,14 +62,57 @@ var docInputSchema = mcp.ToolInputSchema{
 }
 
 type GodocServer struct {
-	server *server.MCPServer
-	cache  map[string]cachedDoc
+	server   *server.MCPServer
+	cache    map[string]cachedDoc
+	tempDirs []string // Track temporary directories for cleanup
 }
 
 type cachedDoc struct {
 	content   string
 	timestamp time.Time
 	byteSize  int
+}
+
+// createTempProject creates a temporary Go project with the given package
+func (s *GodocServer) createTempProject(pkgPath string) (string, error) {
+	// Create temp directory
+	tempDir, err := os.MkdirTemp("", "godoc-mcp-*")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp directory: %v", err)
+	}
+	s.tempDirs = append(s.tempDirs, tempDir)
+
+	// Initialize go.mod
+	cmd := exec.Command("go", "mod", "init", "godoc-temp")
+	cmd.Dir = tempDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("failed to initialize go.mod: %v\noutput: %s", err, out)
+	}
+
+	// If package path is provided and not a standard library package, add it
+	if pkgPath != "" && !isStdLib(pkgPath) {
+		cmd = exec.Command("go", "get", pkgPath)
+		cmd.Dir = tempDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return "", fmt.Errorf("failed to get package %s: %v\noutput: %s", pkgPath, err, out)
+		}
+	}
+
+	return tempDir, nil
+}
+
+// isStdLib checks if a package is part of the Go standard library
+func isStdLib(pkg string) bool {
+	// Standard library packages don't contain a dot in their import path
+	return !strings.Contains(pkg, ".")
+}
+
+// cleanup removes all temporary directories
+func (s *GodocServer) cleanup() {
+	for _, dir := range s.tempDirs {
+		os.RemoveAll(dir)
+	}
+	s.tempDirs = nil
 }
 
 // runGoDoc executes the go doc command with the given arguments and optional working directory
@@ -231,13 +274,20 @@ func (s *GodocServer) handleToolCall(arguments map[string]interface{}) (*mcp.Cal
 		return nil, err
 	}
 
-	// Get working directory if provided
+	// Get or create working directory
 	workingDir := ""
 	if wd, ok := arguments["working_dir"].(string); ok && wd != "" {
 		if info, err := os.Stat(wd); err != nil || !info.IsDir() {
 			return nil, fmt.Errorf("invalid working directory: %v", err)
 		}
 		workingDir = wd
+	} else {
+		// Create temporary project if no working directory provided
+		var err error
+		workingDir, err = s.createTempProject(path)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create temporary project: %v", err)
+		}
 	}
 
 	// Build command arguments
@@ -307,7 +357,8 @@ func main() {
 	log.Printf("Starting godoc-mcp server...")
 
 	godocServer := &GodocServer{
-		cache: make(map[string]cachedDoc),
+		cache:    make(map[string]cachedDoc),
+		tempDirs: make([]string, 0),
 	}
 
 	// Create new MCP server with tools enabled
@@ -332,4 +383,7 @@ func main() {
 	if err := server.ServeStdio(s); err != nil {
 		log.Fatalf("Server error: %v", err)
 	}
+
+	// Cleanup temporary directories before exit
+	godocServer.cleanup()
 }
