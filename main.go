@@ -55,7 +55,7 @@ var docInputSchema = mcp.ToolInputSchema{
 		},
 		"working_dir": map[string]interface{}{
 			"type":        "string",
-			"description": "Optional: Working directory to execute go doc from. Required for some import paths that depend on module context.",
+			"description": "Working directory to execute go doc from. Required for relative paths (including '.') to resolve the correct module context. Optional for absolute paths and standard library packages.",
 		},
 	},
 	Required: []string{"path"},
@@ -75,7 +75,44 @@ type cachedDoc struct {
 
 // createTempProject creates a temporary Go project with the given package
 func (s *GodocServer) createTempProject(pkgPath string) (string, error) {
-	// Create temp directory
+	// For standard library packages, create a minimal temp project
+	if isStdLib(pkgPath) {
+		tempDir, err := os.MkdirTemp("", "godoc-mcp-*")
+		if err != nil {
+			return "", fmt.Errorf("failed to create temp directory: %v", err)
+		}
+		s.tempDirs = append(s.tempDirs, tempDir)
+
+		// Initialize minimal go.mod for std lib access
+		cmd := exec.Command("go", "mod", "init", "godoc-temp")
+		cmd.Dir = tempDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return "", fmt.Errorf("failed to initialize go.mod: %v\noutput: %s", err, out)
+		}
+		return tempDir, nil
+	}
+
+	// For local paths, try to find the module root first
+	if strings.HasPrefix(pkgPath, ".") || strings.HasPrefix(pkgPath, "/") || filepath.IsAbs(pkgPath) {
+		absPath, err := filepath.Abs(pkgPath)
+		if err == nil {
+			// Look for go.mod in current or parent directories
+			dir := absPath
+			for dir != "/" {
+				if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+					// Verify this module contains our target package
+					if info, err := os.Stat(absPath); err == nil {
+						if info.IsDir() || strings.HasSuffix(absPath, ".go") {
+							return dir, nil // Found valid module root
+						}
+					}
+				}
+				dir = filepath.Dir(dir)
+			}
+		}
+	}
+
+	// For non-local paths or if no module root found, create temp project
 	tempDir, err := os.MkdirTemp("", "godoc-mcp-*")
 	if err != nil {
 		return "", fmt.Errorf("failed to create temp directory: %v", err)
@@ -89,8 +126,8 @@ func (s *GodocServer) createTempProject(pkgPath string) (string, error) {
 		return "", fmt.Errorf("failed to initialize go.mod: %v\noutput: %s", err, out)
 	}
 
-	// If package path is provided and not a standard library package, add it
-	if pkgPath != "" && !isStdLib(pkgPath) {
+	// For remote packages, try to get the package
+	if pkgPath != "" && !strings.HasPrefix(pkgPath, ".") && !strings.HasPrefix(pkgPath, "/") && !filepath.IsAbs(pkgPath) {
 		cmd = exec.Command("go", "get", pkgPath)
 		cmd.Dir = tempDir
 		if out, err := cmd.CombinedOutput(); err != nil {
@@ -172,64 +209,68 @@ func (s *GodocServer) runGoDoc(workingDir string, args ...string) (string, error
 }
 
 // validatePath ensures the path is either a valid local file/directory or appears to be a valid import path
-func (s *GodocServer) validatePath(path string) (error, []string) {
-	// If it starts with . or /, treat as local path and validate it exists
-	if strings.HasPrefix(path, ".") || strings.HasPrefix(path, "/") {
-		absPath, err := filepath.Abs(path)
+func (s *GodocServer) validatePath(path string, workingDir string) (string, error, []string) {
+	// For relative paths, working directory is required
+	if strings.HasPrefix(path, ".") {
+		if workingDir == "" {
+			return "", fmt.Errorf("working_dir is required for relative paths (including '.')"), nil
+		}
+
+		// Read go.mod from working directory only
+		modPath := filepath.Join(workingDir, "go.mod")
+		content, err := os.ReadFile(modPath)
 		if err != nil {
-			return fmt.Errorf("invalid path: %v", err), nil
+			return "", fmt.Errorf("failed to read go.mod in working directory: %v", err), nil
 		}
 
-		info, err := os.Stat(absPath)
+		// Parse module name from go.mod
+		var moduleName string
+		for _, line := range strings.Split(string(content), "\n") {
+			if strings.HasPrefix(line, "module ") {
+				moduleName = strings.TrimSpace(strings.TrimPrefix(line, "module "))
+				break
+			}
+		}
+		if moduleName == "" {
+			return "", fmt.Errorf("no module declaration found in go.mod"), nil
+		}
+
+		// If path is ".", use the module name directly
+		if path == "." {
+			return moduleName, nil, nil
+		}
+
+		// For other relative paths, append to module name
+		relPath := strings.TrimPrefix(path, "./")
+		return filepath.Join(moduleName, relPath), nil, nil
+	}
+
+	// Handle absolute paths - must match working directory if provided
+	if strings.HasPrefix(path, "/") || filepath.IsAbs(path) {
+		if workingDir != "" && path != workingDir {
+			return "", fmt.Errorf("absolute path must match working directory when provided"), nil
+		}
+
+		// Read go.mod from the absolute path
+		modPath := filepath.Join(path, "go.mod")
+		content, err := os.ReadFile(modPath)
 		if err != nil {
-			return fmt.Errorf("path does not exist: %v", err), nil
+			return "", fmt.Errorf("failed to read go.mod: %v", err), nil
 		}
 
-		if info.IsDir() {
-			entries, err := os.ReadDir(absPath)
-			if err != nil {
-				return fmt.Errorf("cannot read directory: %v", err), nil
+		// Parse module name from go.mod
+		var moduleName string
+		for _, line := range strings.Split(string(content), "\n") {
+			if strings.HasPrefix(line, "module ") {
+				moduleName = strings.TrimSpace(strings.TrimPrefix(line, "module "))
+				return moduleName, nil, nil
 			}
-
-			// Look for go files in current directory
-			hasGoFiles := false
-			for _, entry := range entries {
-				if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".go") {
-					hasGoFiles = true
-					break
-				}
-			}
-
-			// If no Go files found, collect subdirectories
-			if !hasGoFiles {
-				var subDirs []string
-				for _, entry := range entries {
-					if entry.IsDir() {
-						// Check if subdirectory has any .go files
-						subEntries, err := os.ReadDir(filepath.Join(absPath, entry.Name()))
-						if err == nil {
-							for _, subEntry := range subEntries {
-								if !subEntry.IsDir() && strings.HasSuffix(subEntry.Name(), ".go") {
-									subDirs = append(subDirs, filepath.Join(path, entry.Name()))
-									break
-								}
-							}
-						}
-					}
-				}
-				if len(subDirs) > 0 {
-					return fmt.Errorf("no Go files in directory, but found Go packages in subdirectories"), subDirs
-				}
-				return fmt.Errorf("no Go files found in directory or subdirectories"), nil
-			}
-		} else if !strings.HasSuffix(absPath, ".go") {
-			return fmt.Errorf("file is not a Go source file"), nil
 		}
-		return nil, nil
+		return "", fmt.Errorf("no module declaration found in go.mod"), nil
 	}
 
 	// For all other paths, treat as import path
-	return nil, nil
+	return path, nil, nil
 }
 
 // handleListTools implements the tools/list endpoint
@@ -256,7 +297,17 @@ func (s *GodocServer) handleToolCall(arguments map[string]interface{}) (*mcp.Cal
 		return nil, fmt.Errorf("path argument is required")
 	}
 
-	err, subDirs := s.validatePath(path)
+	// Get working directory
+	workingDir := ""
+	if wd, ok := arguments["working_dir"].(string); ok && wd != "" {
+		if info, err := os.Stat(wd); err != nil || !info.IsDir() {
+			return nil, fmt.Errorf("invalid working directory: %v", err)
+		}
+		workingDir = wd
+	}
+
+	// Validate and resolve the path
+	resolvedPath, err, subDirs := s.validatePath(path, workingDir)
 	if err != nil {
 		if subDirs != nil {
 			// Return a special response indicating available subdirectories
@@ -274,15 +325,11 @@ func (s *GodocServer) handleToolCall(arguments map[string]interface{}) (*mcp.Cal
 		return nil, err
 	}
 
-	// Get or create working directory
-	workingDir := ""
-	if wd, ok := arguments["working_dir"].(string); ok && wd != "" {
-		if info, err := os.Stat(wd); err != nil || !info.IsDir() {
-			return nil, fmt.Errorf("invalid working directory: %v", err)
-		}
-		workingDir = wd
-	} else {
-		// Create temporary project if no working directory provided
+	// Use the resolved path for documentation
+	path = resolvedPath
+
+	// Create temporary project if needed
+	if workingDir == "" {
 		var err error
 		workingDir, err = s.createTempProject(path)
 		if err != nil {
@@ -320,29 +367,12 @@ func (s *GodocServer) handleToolCall(arguments map[string]interface{}) (*mcp.Cal
 	// Calculate byte size
 	byteSize := len(doc)
 
-	// Enhanced metadata with usage guidance
-	metadata := fmt.Sprintf(
-		"Documentation retrieved efficiently (%d bytes) using official Go documentation tools.\n"+
-			"This represents the canonical, structured documentation for the requested package/symbol.\n\n"+
-			"Usage Tips:\n"+
-			"1. Start with basic package docs before looking at source (-src flag)\n"+
-			"2. Use -all flag to see comprehensive package documentation\n"+
-			"3. Use -u flag to see unexported symbols if needed\n"+
-			"4. For specific items, provide the target parameter (e.g., Type, Function, Method)\n\n"+
-			"Example queries:\n"+
-			"- Basic package docs: {\"path\": \"net/http\"}\n"+
-			"- All package docs: {\"path\": \"io\", \"cmd_flags\": [\"-all\"]}\n"+
-			"- Specific type: {\"path\": \"net/http\", \"target\": \"Client\"}\n"+
-			"- Source code: {\"path\": \"io\", \"target\": \"Reader\", \"cmd_flags\": [\"-src\"]}\n",
-		byteSize,
-	)
-
-	// Create the result with metadata
+	// Create the result with just the documentation
 	result := &mcp.CallToolResult{
 		Content: []interface{}{
 			map[string]interface{}{
 				"type": "text",
-				"text": metadata + "\n\n" + doc,
+				"text": doc,
 			},
 		},
 	}
