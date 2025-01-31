@@ -57,6 +57,19 @@ var docInputSchema = mcp.ToolInputSchema{
 			"type":        "string",
 			"description": "Working directory to execute go doc from. Required for relative paths (including '.') to resolve the correct module context. Optional for absolute paths and standard library packages.",
 		},
+		"page": map[string]interface{}{
+			"type":        "integer",
+			"description": "Page number (1-based) for paginated results. Default is 1.",
+			"minimum":     1,
+			"default":     1,
+		},
+		"page_size": map[string]interface{}{
+			"type":        "integer",
+			"description": "Number of lines per page. Default is 1000. Use smaller values for very large documentation.",
+			"minimum":     100,
+			"maximum":     5000,
+			"default":     1000,
+		},
 	},
 	Required: []string{"path"},
 }
@@ -364,20 +377,51 @@ func (s *GodocServer) handleToolCall(arguments map[string]interface{}) (*mcp.Cal
 		return nil, err
 	}
 
-	// Calculate byte size
-	byteSize := len(doc)
+	// Get pagination parameters with defaults
+	page := 1
+	if p, ok := arguments["page"].(float64); ok {
+		page = int(p)
+	}
+	pageSize := 1000
+	if ps, ok := arguments["page_size"].(float64); ok {
+		pageSize = int(ps)
+	}
 
-	// Create the result with just the documentation
+	// Split content into lines
+	lines := strings.Split(doc, "\n")
+	totalLines := len(lines)
+	totalPages := (totalLines + pageSize - 1) / pageSize
+
+	// Validate page number
+	if page > totalPages {
+		return nil, fmt.Errorf("page %d exceeds total pages %d", page, totalPages)
+	}
+
+	// Calculate slice bounds
+	start := (page - 1) * pageSize
+	end := start + pageSize
+	if end > totalLines {
+		end = totalLines
+	}
+
+	// Join the lines for this page
+	pageContent := strings.Join(lines[start:end], "\n")
+
+	// Create pagination metadata
+	metadata := fmt.Sprintf("Page %d of %d (showing lines %d-%d of %d)",
+		page, totalPages, start+1, end, totalLines)
+
+	// Create the result with documentation and pagination info
 	result := &mcp.CallToolResult{
 		Content: []interface{}{
 			map[string]interface{}{
 				"type": "text",
-				"text": doc,
+				"text": metadata + "\n\n" + pageContent,
 			},
 		},
 	}
 
-	log.Printf("Returning result (%d bytes)", byteSize)
+	log.Printf("Returning page %d/%d (%d lines)", page, totalPages, end-start)
 	return result, nil
 }
 
