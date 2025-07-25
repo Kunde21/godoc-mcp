@@ -34,18 +34,18 @@ The documentation is cached for 5 minutes to improve performance.`
 // Create a shared input schema definition to ensure consistency
 var docInputSchema = mcp.ToolInputSchema{
 	Type: "object",
-	Properties: map[string]interface{}{
-		"path": map[string]interface{}{
+	Properties: map[string]any{
+		"path": map[string]any{
 			"type":        "string",
 			"description": "Path to the Go package or file. This can be an import path (e.g., 'io', 'github.com/user/repo') or a local file path.",
 		},
-		"target": map[string]interface{}{
+		"target": map[string]any{
 			"type":        "string",
 			"description": "Optional: Specific symbol to get documentation for (e.g., function name, type name, interface name). Leave empty to get full package documentation.",
 		},
-		"cmd_flags": map[string]interface{}{
+		"cmd_flags": map[string]any{
 			"type": "array",
-			"items": map[string]interface{}{
+			"items": map[string]any{
 				"type": "string",
 			},
 			"description": "Optional: Additional go doc command flags. Common flags:\n" +
@@ -53,17 +53,17 @@ var docInputSchema = mcp.ToolInputSchema{
 				"  -src: Show the source code\n" +
 				"  -u: Show unexported symbols as well as exported",
 		},
-		"working_dir": map[string]interface{}{
+		"working_dir": map[string]any{
 			"type":        "string",
 			"description": "Working directory to execute go doc from. Required for relative paths (including '.') to resolve the correct module context. Optional for absolute paths and standard library packages.",
 		},
-		"page": map[string]interface{}{
+		"page": map[string]any{
 			"type":        "integer",
 			"description": "Page number (1-based) for paginated results. Default is 1.",
 			"minimum":     1,
 			"default":     1,
 		},
-		"page_size": map[string]interface{}{
+		"page_size": map[string]any{
 			"type":        "integer",
 			"description": "Number of lines per page. Default is 1000. Use smaller values for very large documentation.",
 			"minimum":     100,
@@ -287,10 +287,10 @@ func (s *GodocServer) validatePath(path string, workingDir string) (string, erro
 }
 
 // handleListTools implements the tools/list endpoint
-func (s *GodocServer) handleListTools() ([]interface{}, error) {
+func (s *GodocServer) handleListTools() ([]any, error) {
 	log.Printf("handleListTools called")
-	tools := []interface{}{
-		map[string]interface{}{
+	tools := []any{
+		map[string]any{
 			"name":        "get_doc",
 			"description": toolDescription,
 			"inputSchema": docInputSchema,
@@ -301,7 +301,7 @@ func (s *GodocServer) handleListTools() ([]interface{}, error) {
 }
 
 // handleToolCall implements the tools/call endpoint
-func (s *GodocServer) handleToolCall(arguments map[string]interface{}) (*mcp.CallToolResult, error) {
+func (s *GodocServer) handleToolCall(arguments map[string]any) (*mcp.CallToolResult, error) {
 	log.Printf("handleToolCall called with arguments: %+v", arguments)
 
 	// Extract the path from arguments
@@ -327,8 +327,8 @@ func (s *GodocServer) handleToolCall(arguments map[string]interface{}) (*mcp.Cal
 			metadata := fmt.Sprintf("No Go files found in %s, but found Go packages in the following subdirectories:\n", path)
 			listing := strings.Join(subDirs, "\n")
 			return &mcp.CallToolResult{
-				Content: []interface{}{
-					map[string]interface{}{
+				Content: []any{
+					map[string]any{
 						"type": "text",
 						"text": metadata + listing,
 					},
@@ -354,7 +354,7 @@ func (s *GodocServer) handleToolCall(arguments map[string]interface{}) (*mcp.Cal
 	var cmdArgs []string
 
 	// Add any provided command flags
-	if flags, ok := arguments["cmd_flags"].([]interface{}); ok {
+	if flags, ok := arguments["cmd_flags"].([]any); ok {
 		for _, flag := range flags {
 			if flagStr, ok := flag.(string); ok {
 				cmdArgs = append(cmdArgs, flagStr)
@@ -399,10 +399,7 @@ func (s *GodocServer) handleToolCall(arguments map[string]interface{}) (*mcp.Cal
 
 	// Calculate slice bounds
 	start := (page - 1) * pageSize
-	end := start + pageSize
-	if end > totalLines {
-		end = totalLines
-	}
+	end := min(start+pageSize, totalLines)
 
 	// Join the lines for this page
 	pageContent := strings.Join(lines[start:end], "\n")
@@ -412,14 +409,12 @@ func (s *GodocServer) handleToolCall(arguments map[string]interface{}) (*mcp.Cal
 		page, totalPages, start+1, end, totalLines)
 
 	// Create the result with documentation and pagination info
-	result := &mcp.CallToolResult{
-		Content: []interface{}{
-			map[string]interface{}{
-				"type": "text",
-				"text": metadata + "\n\n" + pageContent,
-			},
+	result := &mcp.CallToolResult{Content: []any{
+		map[string]any{
+			"type": "text",
+			"text": metadata + "\n\n" + pageContent,
 		},
-	}
+	}}
 
 	log.Printf("Returning page %d/%d (%d lines)", page, totalPages, end-start)
 	return result, nil
@@ -452,12 +447,12 @@ func main() {
 	}
 	s.AddTool(tool, godocServer.handleToolCall)
 
+	// Cleanup temporary directories before exit
+	defer godocServer.cleanup()
 	// Run server using stdio
 	log.Printf("Starting stdio server...")
 	if err := server.ServeStdio(s); err != nil {
 		log.Fatalf("Server error: %v", err)
 	}
 
-	// Cleanup temporary directories before exit
-	godocServer.cleanup()
 }
