@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +11,7 @@ import (
 	"github.com/jellydator/ttlcache/v3"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
+	"github.com/sirupsen/logrus"
 )
 
 const toolDescription = `Get Go documentation for a package, type, function, or method.
@@ -79,6 +79,7 @@ type GodocServer struct {
 	server   *server.MCPServer
 	cache    *ttlcache.Cache[string, cachedDoc]
 	tempDirs []string // Track temporary directories for cleanup
+	logger   *logrus.Logger
 }
 
 type cachedDoc struct {
@@ -177,7 +178,10 @@ func (s *GodocServer) runGoDoc(workingDir string, args ...string) (string, error
 	// Check cache
 	if item := s.cache.Get(cacheKey); item != nil {
 		doc := item.Value()
-		log.Printf("Cache hit for %s (%d bytes)", cacheKey, doc.byteSize)
+		s.logger.WithFields(logrus.Fields{
+			"cache_key": cacheKey,
+			"bytes":     doc.byteSize,
+		}).Debug("Cache hit")
 		return doc.content, nil
 	}
 
@@ -220,7 +224,10 @@ func (s *GodocServer) runGoDoc(workingDir string, args ...string) (string, error
 		byteSize:  len(content),
 	}, 5*time.Minute)
 
-	log.Printf("Cache miss for %s (%d bytes)", cacheKey, len(content))
+	s.logger.WithFields(logrus.Fields{
+		"cache_key": cacheKey,
+		"bytes":     len(content),
+	}).Debug("Cache miss")
 	return content, nil
 }
 
@@ -291,7 +298,7 @@ func (s *GodocServer) validatePath(path string, workingDir string) (string, erro
 
 // handleListTools implements the tools/list endpoint
 func (s *GodocServer) handleListTools() ([]any, error) {
-	log.Printf("handleListTools called")
+	s.logger.Debug("handleListTools called")
 	tools := []any{
 		map[string]any{
 			"name":        "get_doc",
@@ -299,13 +306,17 @@ func (s *GodocServer) handleListTools() ([]any, error) {
 			"inputSchema": docInputSchema,
 		},
 	}
-	log.Printf("Returning tools: %+v", tools)
+	s.logger.WithFields(logrus.Fields{
+		"tools_count": len(tools),
+	}).Debug("Returning tools")
 	return tools, nil
 }
 
 // handleToolCall implements the tools/call endpoint
 func (s *GodocServer) handleToolCall(arguments map[string]any) (*mcp.CallToolResult, error) {
-	log.Printf("handleToolCall called with arguments: %+v", arguments)
+	s.logger.WithFields(logrus.Fields{
+		"arguments": arguments,
+	}).Debug("handleToolCall called")
 
 	// Extract the path from arguments
 	path, ok := arguments["path"].(string)
@@ -376,7 +387,9 @@ func (s *GodocServer) handleToolCall(arguments map[string]any) (*mcp.CallToolRes
 	// Run go doc command with working directory
 	doc, err := s.runGoDoc(workingDir, cmdArgs...)
 	if err != nil {
-		log.Printf("Error running go doc: %v", err)
+		s.logger.WithFields(logrus.Fields{
+			"error": err,
+		}).Error("Error running go doc")
 		return nil, err
 	}
 
@@ -419,14 +432,20 @@ func (s *GodocServer) handleToolCall(arguments map[string]any) (*mcp.CallToolRes
 		},
 	}}
 
-	log.Printf("Returning page %d/%d (%d lines)", page, totalPages, end-start)
+	s.logger.WithFields(logrus.Fields{
+		"page":        page,
+		"total_pages": totalPages,
+		"lines":       end - start,
+	}).Debug("Returning paginated documentation")
 	return result, nil
 }
 
 func main() {
-	// Set up logging to stderr (since stdout is used for MCP communication)
-	log.SetOutput(os.Stderr)
-	log.Printf("Starting godoc-mcp server...")
+	// Set up structured logging to stderr (since stdout is used for MCP communication)
+	logger := logrus.New()
+	logger.SetOutput(os.Stderr)
+	logger.SetLevel(logrus.InfoLevel)
+	logger.Info("Starting godoc-mcp server...")
 
 	cache := ttlcache.New[string, cachedDoc](
 		ttlcache.WithTTL[string, cachedDoc](5 * time.Minute),
@@ -436,6 +455,7 @@ func main() {
 	godocServer := &GodocServer{
 		cache:    cache,
 		tempDirs: make([]string, 0),
+		logger:   logger,
 	}
 
 	// Create new MCP server with tools enabled
@@ -447,7 +467,7 @@ func main() {
 	)
 	godocServer.server = s
 
-	log.Printf("Adding get_doc tool...")
+	logger.Info("Adding get_doc tool...")
 	tool := mcp.Tool{
 		Name:        "get_doc",
 		Description: toolDescription,
@@ -458,9 +478,11 @@ func main() {
 	// Cleanup temporary directories before exit
 	defer godocServer.cleanup()
 	// Run server using stdio
-	log.Printf("Starting stdio server...")
+	logger.Info("Starting stdio server...")
 	if err := server.ServeStdio(s); err != nil {
-		log.Fatalf("Server error: %v", err)
+		logger.WithFields(logrus.Fields{
+			"error": err,
+		}).Fatal("Server error")
 	}
 
 }
