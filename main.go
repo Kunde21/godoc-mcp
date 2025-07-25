@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jellydator/ttlcache/v3"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
@@ -76,7 +77,7 @@ var docInputSchema = mcp.ToolInputSchema{
 
 type GodocServer struct {
 	server   *server.MCPServer
-	cache    map[string]cachedDoc
+	cache    *ttlcache.Cache[string, cachedDoc]
 	tempDirs []string // Track temporary directories for cleanup
 }
 
@@ -157,12 +158,15 @@ func isStdLib(pkg string) bool {
 	return !strings.Contains(pkg, ".")
 }
 
-// cleanup removes all temporary directories
+// cleanup removes all temporary directories and stops the cache
 func (s *GodocServer) cleanup() {
 	for _, dir := range s.tempDirs {
 		os.RemoveAll(dir)
 	}
 	s.tempDirs = nil
+	if s.cache != nil {
+		s.cache.Stop()
+	}
 }
 
 // runGoDoc executes the go doc command with the given arguments and optional working directory
@@ -170,12 +174,11 @@ func (s *GodocServer) runGoDoc(workingDir string, args ...string) (string, error
 	// Create cache key that includes working directory
 	cacheKey := workingDir + "|" + strings.Join(args, "|")
 
-	// Check cache (with 5 minute expiration)
-	if doc, ok := s.cache[cacheKey]; ok {
-		if time.Since(doc.timestamp) < 5*time.Minute {
-			log.Printf("Cache hit for %s (%d bytes)", cacheKey, doc.byteSize)
-			return doc.content, nil
-		}
+	// Check cache
+	if item := s.cache.Get(cacheKey); item != nil {
+		doc := item.Value()
+		log.Printf("Cache hit for %s (%d bytes)", cacheKey, doc.byteSize)
+		return doc.content, nil
 	}
 
 	cmd := exec.Command("go", append([]string{"doc"}, args...)...)
@@ -211,11 +214,11 @@ func (s *GodocServer) runGoDoc(workingDir string, args ...string) (string, error
 	}
 
 	content := string(out)
-	s.cache[cacheKey] = cachedDoc{
+	s.cache.Set(cacheKey, cachedDoc{
 		content:   content,
 		timestamp: time.Now(),
 		byteSize:  len(content),
-	}
+	}, 5*time.Minute)
 
 	log.Printf("Cache miss for %s (%d bytes)", cacheKey, len(content))
 	return content, nil
@@ -425,8 +428,13 @@ func main() {
 	log.SetOutput(os.Stderr)
 	log.Printf("Starting godoc-mcp server...")
 
+	cache := ttlcache.New[string, cachedDoc](
+		ttlcache.WithTTL[string, cachedDoc](5 * time.Minute),
+	)
+	go cache.Start()
+
 	godocServer := &GodocServer{
-		cache:    make(map[string]cachedDoc),
+		cache:    cache,
 		tempDirs: make([]string, 0),
 	}
 
