@@ -78,7 +78,6 @@ var docInputSchema = mcp.ToolInputSchema{
 }
 
 type GodocServer struct {
-	server   *server.MCPServer
 	cache    *ttlcache.Cache[string, cachedDoc]
 	tempDirs []string // Track temporary directories for cleanup
 	logger   *logrus.Logger
@@ -305,22 +304,6 @@ func (*GodocServer) validatePath(path string, workingDir string) (string, error,
 	return path, nil, nil
 }
 
-// handleListTools implements the tools/list endpoint
-func (s *GodocServer) handleListTools() ([]any, error) {
-	s.logger.Debug("handleListTools called")
-	tools := []any{
-		map[string]any{
-			"name":        "get_doc",
-			"description": toolDescription,
-			"inputSchema": docInputSchema,
-		},
-	}
-	s.logger.WithFields(logrus.Fields{
-		"tools_count": len(tools),
-	}).Debug("Returning tools")
-	return tools, nil
-}
-
 // handleToolCall implements the tools/call endpoint
 func (s *GodocServer) handleToolCall(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	s.logger.WithField("arguments", request).Debug("handleToolCall called")
@@ -328,20 +311,14 @@ func (s *GodocServer) handleToolCall(ctx context.Context, request mcp.CallToolRe
 	// Extract the path from arguments
 	path := request.GetString("path", "")
 	if path == "" {
-		return &mcp.CallToolResult{
-			Result: mcp.Result{
-				Meta: map[string]any{},
-			},
-			Content: []mcp.Content{mcp.NewTextContent("invalid path parameter")},
-			IsError: true,
-		}, nil
+		return mcp.NewToolResultError("invalid or missing path parameter"), nil
 	}
 
 	// Get working directory
 	workingDir := request.GetString("working_dir", "")
 	if workingDir != "" {
 		if info, err := os.Stat(workingDir); err != nil || !info.IsDir() {
-			return nil, fmt.Errorf("invalid working directory: %v", err)
+			return mcp.NewToolResultErrorFromErr("invalid working directory", err), nil
 		}
 	}
 
@@ -352,14 +329,8 @@ func (s *GodocServer) handleToolCall(ctx context.Context, request mcp.CallToolRe
 			return nil, err
 		}
 		// Return a special response indicating available subdirectories
-		return &mcp.CallToolResult{
-			Content: []mcp.Content{mcp.NewTextContent(
-				fmt.Sprintf("No Go files found in %s, but found Go packages in the following subdirectories:\n%s",
-					path, strings.Join(subDirs, "\n"))),
-			},
-			Result:  mcp.Result{Meta: map[string]any{}},
-			IsError: true,
-		}, nil
+		return mcp.NewToolResultErrorf("No Go files found in %s, but found Go packages in the following subdirectories:\n%s",
+			path, strings.Join(subDirs, "\n")), nil
 	}
 
 	// Use the resolved path for documentation
@@ -370,7 +341,7 @@ func (s *GodocServer) handleToolCall(ctx context.Context, request mcp.CallToolRe
 		var err error
 		workingDir, err = s.createTempProject(path)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create temporary project: %v", err)
+			return mcp.NewToolResultErrorFromErr("failed to create temporary project", err), nil
 		}
 	}
 
@@ -388,7 +359,7 @@ func (s *GodocServer) handleToolCall(ctx context.Context, request mcp.CallToolRe
 	doc, err := s.runGoDoc(workingDir, cmdArgs...)
 	if err != nil {
 		s.logger.WithField("error", err).Error("Error running go doc")
-		return nil, err
+		return mcp.NewToolResultErrorFromErr("failed to get doc", err), nil
 	}
 
 	// Get pagination parameters with defaults
@@ -402,13 +373,7 @@ func (s *GodocServer) handleToolCall(ctx context.Context, request mcp.CallToolRe
 
 	// Validate page number
 	if page > totalPages {
-		return &mcp.CallToolResult{
-			Result: mcp.Result{},
-			Content: []mcp.Content{
-				mcp.NewTextContent(fmt.Sprintf("page %d exceeds total pages %d", page, totalPages)),
-			},
-			IsError: true,
-		}, nil
+		return mcp.NewToolResultErrorf("page %d exceeds total pages %d", page, totalPages), nil
 	}
 
 	// Calculate slice bounds
@@ -423,37 +388,27 @@ func (s *GodocServer) handleToolCall(ctx context.Context, request mcp.CallToolRe
 		page, totalPages, start+1, end, totalLines)
 
 	// Create the result with documentation and pagination info
-	result := &mcp.CallToolResult{
-		Content: []mcp.Content{
-			mcp.NewTextContent(metadata + "\n\n" + pageContent),
-		},
-		Result:  mcp.Result{},
-		IsError: false,
-	}
-
 	s.logger.WithFields(logrus.Fields{
 		"page":        page,
 		"total_pages": totalPages,
 		"lines":       end - start,
 	}).Debug("Returning paginated documentation")
-	return result, nil
+	return mcp.NewToolResultText(metadata + "\n\n" + pageContent), nil
 }
 
 func main() {
 	// Set up structured logging to stderr (since stdout is used for MCP communication)
 	logger := logrus.New()
 	logger.SetOutput(os.Stderr)
-	logger.SetLevel(logrus.InfoLevel)
+	logger.SetLevel(logrus.DebugLevel)
 	logger.Info("Starting godoc-mcp server...")
 
-	cache := ttlcache.New(ttlcache.WithTTL[string, cachedDoc](5 * time.Minute))
-	go cache.Start()
-
-	godocServer := &GodocServer{
-		cache:    cache,
+	srv := &GodocServer{
+		cache:    ttlcache.New(ttlcache.WithTTL[string, cachedDoc](5 * time.Minute)),
 		tempDirs: make([]string, 0),
 		logger:   logger,
 	}
+	go srv.cache.Start()
 
 	// Create new MCP server with tools enabled
 	s := server.NewMCPServer(
@@ -462,25 +417,20 @@ func main() {
 		server.WithToolCapabilities(true), // Enable tools
 		server.WithLogging(),              // Add logging
 	)
-	godocServer.server = s
 
 	logger.Info("Adding get_doc tool...")
-	tool := mcp.Tool{
-		Name:        "get_doc",
+	s.AddTool(mcp.Tool{
+		Name:        "godoc",
 		Description: toolDescription,
 		InputSchema: docInputSchema,
-		Annotations: mcp.ToolAnnotation{},
-	}
-	s.AddTool(tool, godocServer.handleToolCall)
+	}, srv.handleToolCall)
 
 	// Cleanup temporary directories before exit
-	defer godocServer.cleanup()
+	defer srv.cleanup()
 	// Run server using stdio
 	logger.Info("Starting stdio server...")
 	if err := server.ServeStdio(s); err != nil {
-		logger.WithFields(logrus.Fields{
-			"error": err,
-		}).Fatal("Server error")
+		logger.WithField("error", err).Fatal("Server error")
 	}
 
 }
