@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -91,44 +92,27 @@ type cachedDoc struct {
 
 // createTempProject creates a temporary Go project with the given package
 func (s *GodocServer) createTempProject(pkgPath string) (string, error) {
-	// For standard library packages, create a minimal temp project
-	if isStdLib(pkgPath) {
-		tempDir, err := os.MkdirTemp("", "godoc-mcp-*")
-		if err != nil {
-			return "", fmt.Errorf("failed to create temp directory: %v", err)
-		}
-		s.tempDirs = append(s.tempDirs, tempDir)
-
-		// Initialize minimal go.mod for std lib access
-		cmd := exec.Command("go", "mod", "init", "godoc-temp")
-		cmd.Dir = tempDir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return "", fmt.Errorf("failed to initialize go.mod: %v\noutput: %s", err, out)
-		}
-		return tempDir, nil
-	}
-
-	// For local paths, try to find the module root first
-	if strings.HasPrefix(pkgPath, ".") || strings.HasPrefix(pkgPath, "/") || filepath.IsAbs(pkgPath) {
+	switch {
+	case isStdLib(pkgPath):
+		// Standard library package, create a minimal temp project
+	case strings.HasPrefix(pkgPath, "."),
+		strings.HasPrefix(pkgPath, "/"):
+		// Relative path, identify absolute path before finding go.mod
 		absPath, err := filepath.Abs(pkgPath)
-		if err == nil {
-			// Look for go.mod in current or parent directories
-			dir := absPath
-			for dir != "/" {
-				if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
-					// Verify this module contains our target package
-					if info, err := os.Stat(absPath); err == nil {
-						if info.IsDir() || strings.HasSuffix(absPath, ".go") {
-							return dir, nil // Found valid module root
-						}
-					}
-				}
-				dir = filepath.Dir(dir)
-			}
+		if err != nil {
+			break
+		}
+		pkgPath = absPath
+		fallthrough
+	case filepath.IsAbs(pkgPath):
+		// Local path, try to find the module root first
+		// Look for go.mod in current or parent directories
+		if s1 := walkUpDir(pkgPath); s1 != "" {
+			return s1, nil
 		}
 	}
 
-	// For non-local paths or if no module root found, create temp project
+	// Create temp project
 	tempDir, err := os.MkdirTemp("", "godoc-mcp-*")
 	if err != nil {
 		return "", fmt.Errorf("failed to create temp directory: %v", err)
@@ -142,16 +126,40 @@ func (s *GodocServer) createTempProject(pkgPath string) (string, error) {
 		return "", fmt.Errorf("failed to initialize go.mod: %v\noutput: %s", err, out)
 	}
 
-	// For remote packages, try to get the package
-	if pkgPath != "" && !strings.HasPrefix(pkgPath, ".") && !strings.HasPrefix(pkgPath, "/") && !filepath.IsAbs(pkgPath) {
-		cmd = exec.Command("go", "get", pkgPath)
-		cmd.Dir = tempDir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return "", fmt.Errorf("failed to get package %s: %v\noutput: %s", pkgPath, err, out)
-		}
+	switch {
+	case pkgPath == "", filepath.IsAbs(pkgPath), isStdLib(pkgPath):
+		return tempDir, nil
+	default:
+		// Remote package, fetch the package
 	}
 
+	cmd = exec.Command("go", "get", pkgPath)
+	cmd.Dir = tempDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("failed to get package %s: %v\noutput: %s", pkgPath, err, out)
+	}
 	return tempDir, nil
+}
+
+func walkUpDir(absPath string) string {
+	stat, err := fs.Stat(os.DirFS("/"), absPath)
+	if err != nil {
+		return ""
+	}
+	if !stat.IsDir() && filepath.Ext(absPath) != ".go" {
+		return ""
+	}
+	dir := absPath
+	if !stat.IsDir() {
+		dir = filepath.Dir(absPath)
+	}
+	for dir != "/" {
+		if _, err := fs.Stat(os.DirFS(dir), "go.mod"); err == nil {
+			return dir // Found valid module root
+		}
+		dir = filepath.Dir(dir)
+	}
+	return ""
 }
 
 // isStdLib checks if a package is part of the Go standard library
@@ -233,7 +241,7 @@ func (s *GodocServer) runGoDoc(workingDir string, args ...string) (string, error
 }
 
 // validatePath ensures the path is either a valid local file/directory or appears to be a valid import path
-func (s *GodocServer) validatePath(path string, workingDir string) (string, error, []string) {
+func (*GodocServer) validatePath(path string, workingDir string) (string, error, []string) {
 	// For relative paths, working directory is required
 	if strings.HasPrefix(path, ".") {
 		if workingDir == "" {
@@ -340,21 +348,18 @@ func (s *GodocServer) handleToolCall(ctx context.Context, request mcp.CallToolRe
 	// Validate and resolve the path
 	resolvedPath, err, subDirs := s.validatePath(path, workingDir)
 	if err != nil {
-		if subDirs != nil {
-			// Return a special response indicating available subdirectories
-			metadata := fmt.Sprintf("No Go files found in %s, but found Go packages in the following subdirectories:\n", path)
-			listing := strings.Join(subDirs, "\n")
-			return &mcp.CallToolResult{
-				Content: []mcp.Content{
-					mcp.NewTextContent(metadata + listing),
-				},
-				Result: mcp.Result{
-					Meta: map[string]any{},
-				},
-				IsError: true,
-			}, nil
+		if subDirs == nil {
+			return nil, err
 		}
-		return nil, err
+		// Return a special response indicating available subdirectories
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{mcp.NewTextContent(
+				fmt.Sprintf("No Go files found in %s, but found Go packages in the following subdirectories:\n%s",
+					path, strings.Join(subDirs, "\n"))),
+			},
+			Result:  mcp.Result{Meta: map[string]any{}},
+			IsError: true,
+		}, nil
 	}
 
 	// Use the resolved path for documentation
@@ -397,7 +402,13 @@ func (s *GodocServer) handleToolCall(ctx context.Context, request mcp.CallToolRe
 
 	// Validate page number
 	if page > totalPages {
-		return nil, fmt.Errorf("page %d exceeds total pages %d", page, totalPages)
+		return &mcp.CallToolResult{
+			Result: mcp.Result{},
+			Content: []mcp.Content{
+				mcp.NewTextContent(fmt.Sprintf("page %d exceeds total pages %d", page, totalPages)),
+			},
+			IsError: true,
+		}, nil
 	}
 
 	// Calculate slice bounds
@@ -435,9 +446,7 @@ func main() {
 	logger.SetLevel(logrus.InfoLevel)
 	logger.Info("Starting godoc-mcp server...")
 
-	cache := ttlcache.New[string, cachedDoc](
-		ttlcache.WithTTL[string, cachedDoc](5 * time.Minute),
-	)
+	cache := ttlcache.New(ttlcache.WithTTL[string, cachedDoc](5 * time.Minute))
 	go cache.Start()
 
 	godocServer := &GodocServer{
@@ -460,6 +469,7 @@ func main() {
 		Name:        "get_doc",
 		Description: toolDescription,
 		InputSchema: docInputSchema,
+		Annotations: mcp.ToolAnnotation{},
 	}
 	s.AddTool(tool, godocServer.handleToolCall)
 
