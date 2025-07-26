@@ -1,3 +1,63 @@
+// Package godoc-mcp provides a Model Context Protocol (MCP) server for accessing Go documentation.
+// It serves as a bridge between AI assistants and Go's documentation system, enabling efficient
+// retrieval of package, type, function, and method documentation through standardized MCP tools.
+//
+// # Overview
+//
+// This server implements the MCP protocol to provide Go documentation access to AI assistants.
+// It uses the standard `go doc` command under the hood but adds caching, error handling,
+// and a clean MCP interface. The server supports:
+//
+//   - Standard library packages (e.g., "io", "net/http")
+//   - External packages via import paths (e.g., "github.com/user/repo")
+//   - Local packages via relative or absolute paths (e.g., "./pkg", "/path/to/module")
+//   - Specific symbol lookup (functions, types, interfaces, methods)
+//   - Pagination for large documentation sets
+//   - Intelligent caching with 5-minute TTL
+//
+// # Usage
+//
+// The server is designed to be run as an MCP tool server. When started, it exposes a single
+// tool called "get_doc" that accepts various parameters for documentation retrieval.
+//
+// Example tool usage:
+//
+//	{
+//	  "path": "net/http",
+//	  "target": "Get",
+//	  "cmd_flags": ["-u"]
+//	}
+//
+// # Architecture
+//
+// The server consists of several key components:
+//
+//   - GodocServer: Main server struct managing cache and temporary directories
+//   - TTL cache: Efficient caching of documentation responses
+//   - Temporary project management: Handles external package dependencies
+//   - Error handling: Provides helpful suggestions for common issues
+//   - Pagination: Supports large documentation sets with configurable page sizes
+//
+// # Error Handling
+//
+// The server provides detailed error messages with actionable suggestions:
+//
+//   - Package not found: Suggests checking package name, import path, or local path
+//   - Symbol not found: Recommends using -u flag for unexported symbols
+//   - Build constraints: Advises on platform-specific issues
+//   - Missing dependencies: Guides users on package installation
+//
+// # Performance
+//
+// Documentation responses are cached for 5 minutes to improve performance. The cache
+// automatically invalidates based on TTL and includes byte size tracking for monitoring.
+// Temporary directories are automatically cleaned up on server shutdown.
+//
+// # Security
+//
+// The server runs documentation commands in isolated temporary directories when
+// dealing with external packages. Local path access is restricted to prevent
+// directory traversal attacks.
 package main
 
 import (
@@ -420,7 +480,7 @@ func main() {
 
 	logger.Info("Adding get_doc tool...")
 	s.AddTool(mcp.Tool{
-		Name:        "godoc",
+		Name:        "get_doc",
 		Description: toolDescription,
 		InputSchema: docInputSchema,
 	}, srv.handleToolCall)
