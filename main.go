@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -313,24 +314,27 @@ func (s *GodocServer) handleListTools() ([]any, error) {
 }
 
 // handleToolCall implements the tools/call endpoint
-func (s *GodocServer) handleToolCall(arguments map[string]any) (*mcp.CallToolResult, error) {
-	s.logger.WithFields(logrus.Fields{
-		"arguments": arguments,
-	}).Debug("handleToolCall called")
+func (s *GodocServer) handleToolCall(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	s.logger.WithField("arguments", request).Debug("handleToolCall called")
 
 	// Extract the path from arguments
-	path, ok := arguments["path"].(string)
-	if !ok {
-		return nil, fmt.Errorf("path argument is required")
+	path := request.GetString("path", "")
+	if path == "" {
+		return &mcp.CallToolResult{
+			Result: mcp.Result{
+				Meta: map[string]any{},
+			},
+			Content: []mcp.Content{mcp.NewTextContent("invalid path parameter")},
+			IsError: true,
+		}, nil
 	}
 
 	// Get working directory
-	workingDir := ""
-	if wd, ok := arguments["working_dir"].(string); ok && wd != "" {
-		if info, err := os.Stat(wd); err != nil || !info.IsDir() {
+	workingDir := request.GetString("working_dir", "")
+	if workingDir != "" {
+		if info, err := os.Stat(workingDir); err != nil || !info.IsDir() {
 			return nil, fmt.Errorf("invalid working directory: %v", err)
 		}
-		workingDir = wd
 	}
 
 	// Validate and resolve the path
@@ -341,12 +345,13 @@ func (s *GodocServer) handleToolCall(arguments map[string]any) (*mcp.CallToolRes
 			metadata := fmt.Sprintf("No Go files found in %s, but found Go packages in the following subdirectories:\n", path)
 			listing := strings.Join(subDirs, "\n")
 			return &mcp.CallToolResult{
-				Content: []any{
-					map[string]any{
-						"type": "text",
-						"text": metadata + listing,
-					},
+				Content: []mcp.Content{
+					mcp.NewTextContent(metadata + listing),
 				},
+				Result: mcp.Result{
+					Meta: map[string]any{},
+				},
+				IsError: true,
 			}, nil
 		}
 		return nil, err
@@ -364,44 +369,26 @@ func (s *GodocServer) handleToolCall(arguments map[string]any) (*mcp.CallToolRes
 		}
 	}
 
-	// Build command arguments
-	var cmdArgs []string
-
 	// Add any provided command flags
-	if flags, ok := arguments["cmd_flags"].([]any); ok {
-		for _, flag := range flags {
-			if flagStr, ok := flag.(string); ok {
-				cmdArgs = append(cmdArgs, flagStr)
-			}
-		}
-	}
-
+	cmdArgs := request.GetStringSlice("cmd_flags", []string{})
 	// Add the path
 	cmdArgs = append(cmdArgs, path)
 
 	// Add specific target if provided
-	if target, ok := arguments["target"].(string); ok && target != "" {
+	if target := request.GetString("target", ""); target != "" {
 		cmdArgs = append(cmdArgs, target)
 	}
 
 	// Run go doc command with working directory
 	doc, err := s.runGoDoc(workingDir, cmdArgs...)
 	if err != nil {
-		s.logger.WithFields(logrus.Fields{
-			"error": err,
-		}).Error("Error running go doc")
+		s.logger.WithField("error", err).Error("Error running go doc")
 		return nil, err
 	}
 
 	// Get pagination parameters with defaults
-	page := 1
-	if p, ok := arguments["page"].(float64); ok {
-		page = int(p)
-	}
-	pageSize := 1000
-	if ps, ok := arguments["page_size"].(float64); ok {
-		pageSize = int(ps)
-	}
+	page := request.GetInt("page", 1)
+	pageSize := request.GetInt("page_size", 1000)
 
 	// Split content into lines
 	lines := strings.Split(doc, "\n")
@@ -425,12 +412,13 @@ func (s *GodocServer) handleToolCall(arguments map[string]any) (*mcp.CallToolRes
 		page, totalPages, start+1, end, totalLines)
 
 	// Create the result with documentation and pagination info
-	result := &mcp.CallToolResult{Content: []any{
-		map[string]any{
-			"type": "text",
-			"text": metadata + "\n\n" + pageContent,
+	result := &mcp.CallToolResult{
+		Content: []mcp.Content{
+			mcp.NewTextContent(metadata + "\n\n" + pageContent),
 		},
-	}}
+		Result:  mcp.Result{},
+		IsError: false,
+	}
 
 	s.logger.WithFields(logrus.Fields{
 		"page":        page,
