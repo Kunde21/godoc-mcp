@@ -62,6 +62,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"io/fs"
 	"os"
@@ -487,6 +488,18 @@ func main() {
 
 	// Cleanup temporary directories before exit
 	defer srv.cleanup()
+
+	var srvHTTP string
+	flag.StringVar(&srvHTTP, "http", "", "serve as http")
+	flag.Parse()
+	if srvHTTP != "" {
+		logger.Info("Starting http server...")
+		sse := server.NewStreamableHTTPServer(s)
+		if err := sse.Start(srvHTTP); err != nil {
+			logger.WithError(err).Fatal("sse error")
+		}
+		return
+	}
 	// Run server using stdio
 	logger.Info("Starting stdio server...")
 	if err := server.ServeStdio(s); err != nil {
