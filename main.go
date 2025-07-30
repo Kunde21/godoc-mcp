@@ -138,9 +138,9 @@ var docInputSchema = mcp.ToolInputSchema{
 }
 
 type GodocServer struct {
-	cache    *ttlcache.Cache[string, cachedDoc]
-	tempDirs []string // Track temporary directories for cleanup
-	logger   *logrus.Logger
+	cache          *ttlcache.Cache[string, cachedDoc]
+	projectManager *ProjectManager
+	logger         *logrus.Logger
 }
 
 type cachedDoc struct {
@@ -310,7 +310,7 @@ func (s *GodocServer) handleToolCall(ctx context.Context, request mcp.CallToolRe
 	// Create temporary project if needed
 	if workingDir == "" {
 		var err error
-		workingDir, err = s.createTempProject(path)
+		workingDir, err = s.projectManager.GetOrCreateProject(path)
 		if err != nil {
 			return mcp.NewToolResultErrorFromErr("failed to create temporary project", err), nil
 		}
@@ -367,6 +367,15 @@ func (s *GodocServer) handleToolCall(ctx context.Context, request mcp.CallToolRe
 	return mcp.NewToolResultText(metadata + "\n\n" + pageContent), nil
 }
 
+// cleanup removes all temporary directories and stops the cache
+func (s *GodocServer) cleanup() {
+	s.projectManager.cleanup()
+	if s.cache != nil {
+		s.cache.DeleteAll()
+		s.cache.Stop()
+	}
+}
+
 func main() {
 	// Set up structured logging to stderr (since stdout is used for MCP communication)
 	logger := logrus.New()
@@ -375,9 +384,9 @@ func main() {
 	logger.Info("Starting godoc-mcp server...")
 
 	srv := &GodocServer{
-		cache:    ttlcache.New(ttlcache.WithTTL[string, cachedDoc](5 * time.Minute)),
-		tempDirs: make([]string, 0),
-		logger:   logger,
+		cache:          ttlcache.New(ttlcache.WithTTL[string, cachedDoc](5 * time.Minute)),
+		projectManager: NewProjectManager(logger),
+		logger:         logger,
 	}
 	go srv.cache.Start()
 
